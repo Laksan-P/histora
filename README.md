@@ -1,73 +1,67 @@
-# React + TypeScript + Vite
+# Histora — Interview the Past
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Histora is an AI-powered historical learning platform that lets users interact with historical events through character-based conversations. Instead of reading static textbook content, users can choose a historical event, select a perspective, ask questions, hear voice responses, view cited source evidence, and generate quizzes from curated archive notes.
 
-Currently, two official plugins are available:
+Built for a hackathon MVP, Histora combines source-grounded AI, voice interaction, admin-managed content, and an immersive historical interface.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+---
 
-## React Compiler
+## ✨ Features
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+### Historical Event Exploration
+- Browse curated historical events
+- Select event-based perspectives/characters
+- Explore history through guided conversations
 
-## Expanding the ESLint configuration
+### Source-Grounded AI Chat
+- Ask questions to historical perspectives
+- AI answers using curated source notes
+- Responses cite source evidence
+- If information is unavailable, the system avoids unsupported answers
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+### Voice Experience
+- ElevenLabs text-to-speech support
+- Male/Female voice selector
+- Voice playback with animated speaking state
+- Browser speech-to-text input
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+### Live Interview Mode
+- Voice-based conversation flow
+- User speaks, AI responds, voice plays back
+- Designed to feel like interviewing a historical perspective
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+### Source Evidence
+- Source cards connected to each character/event
+- Citation links open original references
+- Users can save/archive source cards
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+### Quiz Generation
+- Generate MCQs from source notes
+- Useful for learning, revision, and classroom demos
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+### User Accounts
+- Email signup/login using Supabase Auth
+- Normal users can explore events, chat, save conversations, and generate quizzes
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+### Admin Dashboard
+- Admin-only dashboard
+- CRUD operations for:
+  - Events
+  - Characters
+  - Source Notes
+- View users and conversation logs
+- Content changes sync with Supabase
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+---
+
+## 🛠️ Tech Stack
+
+- **Frontend:** React + Vite + TypeScript
+- **Styling:** Tailwind CSS
+- **Animations:** Framer Motion
+- **Database/Auth:** Supabase
+- **AI Chat:** OpenAI API
+- **Voice:** ElevenLabs API
+- **Deployment:** Vercel
+
+---
