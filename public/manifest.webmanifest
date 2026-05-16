@@ -1,0 +1,23 @@
+{
+  "name": "Histora — Interview the Past",
+  "short_name": "Histora",
+  "description": "Source-grounded historical conversations with voice-led storytelling.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0c0c0c",
+  "theme_color": "#0c0c0c",
+  "icons": [
+    {
+      "src": "/histora.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/histora.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
