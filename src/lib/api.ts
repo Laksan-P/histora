@@ -123,19 +123,58 @@ export function buildChatHistory(messages: ChatMessage[]) {
     .map((message) => ({ role: message.role, content: message.content }))
 }
 
+/**
+ * Client-side ceiling for /api/tts. Slightly higher than the server's
+ * 15s upstream timeout so the API has a chance to respond with a clean
+ * JSON error before we abandon. If we abort first, the user gets the
+ * generic "voice unavailable" toast rather than waiting for Vercel's
+ * 300s task-timed-out wall.
+ */
+const TTS_CLIENT_TIMEOUT_MS = 18_000
+
 export async function requestSpeech(
   text: string,
   options: { signal?: AbortSignal; selectedVoice: TtsVoiceGender },
 ): Promise<Blob> {
-  const response = await fetch(TTS_ENDPOINT, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    signal: options.signal,
-    body: JSON.stringify({
-      text,
-      selectedVoice: options.selectedVoice,
-    }),
-  })
+  // Combine the caller's signal with our own time-bound controller so
+  // either an external cancel OR the timeout aborts the request — and
+  // the timer is always cleared so we never leak a setTimeout handle.
+  const controller = new AbortController()
+  const externalSignal = options.signal
+  const onExternalAbort = () => controller.abort()
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort()
+    else externalSignal.addEventListener('abort', onExternalAbort, { once: true })
+  }
+  const timeoutId = window.setTimeout(
+    () => controller.abort(),
+    TTS_CLIENT_TIMEOUT_MS,
+  )
+
+  let response: Response
+  try {
+    response = await fetch(TTS_ENDPOINT, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        text,
+        selectedVoice: options.selectedVoice,
+      }),
+    })
+  } catch (error) {
+    // Distinguish our timeout from a caller-driven cancel so the UI can
+    // show a sensible message (caller cancels are silent in App.tsx).
+    if (controller.signal.aborted && externalSignal?.aborted !== true) {
+      throw new Error('Voice request timed out', { cause: error })
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeoutId)
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', onExternalAbort)
+    }
+  }
 
   const contentType = response.headers.get('content-type') ?? ''
 

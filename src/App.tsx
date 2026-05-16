@@ -1259,6 +1259,7 @@ function HistoraApp({ userId, userEmail, isAdmin, profile }: HistoraAppProps) {
           setPlayingMessageId(null)
           currentVoiceMessageRef.current = null
           setTtsError('Voice playback failed. Tap Play Voice to try again.')
+          showToast('error', 'Voice unavailable right now.')
         })
 
         setIsSynthesizing(false)
@@ -1268,21 +1269,28 @@ function HistoraApp({ userId, userEmail, isAdmin, profile }: HistoraAppProps) {
         if (controller.signal.aborted) return
 
         if (currentVoiceMessageRef.current === messageId) {
-          const msg =
+          const detail =
             error instanceof Error ? error.message : 'Voice synthesis failed.'
-          console.error('[histora] tts failed:', error)
-          setTtsError(msg)
+          console.error('[histora] tts failed:', detail)
+          // Keep the inline banner detailed (ElevenLabs status / quota
+          // hint helps debugging) but always raise a single, friendly
+          // toast so the user is never left with the spinner stuck.
+          setTtsError(detail)
+          showToast('error', 'Voice unavailable right now.')
           stopCurrentAudio()
           setPlayingMessageId(null)
           currentVoiceMessageRef.current = null
         }
       } finally {
+        // Spinner MUST clear no matter how we exit — success, error,
+        // abort, race with a newer generation. This is the safety net
+        // that prevents the "Generating voice…" UI from sticking.
         if (generation === ttsGenerationRef.current) {
           setIsSynthesizing(false)
         }
       }
     },
-    [messages, playingMessageId, stopCurrentAudio],
+    [messages, playingMessageId, showToast, stopCurrentAudio],
   )
 
   const handleTtsVoiceGenderChange = useCallback((gender: TtsVoiceGender) => {
