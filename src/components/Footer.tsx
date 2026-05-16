@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { ExternalLink, Sparkles } from 'lucide-react'
+import { Sparkles } from 'lucide-react'
 import { cn } from '../lib/cn'
 import { HistoraLogoMark } from './HistoraLogoMark'
 
@@ -43,16 +43,11 @@ export default function Footer({ variant }: { variant?: 'default' | 'chat' }) {
               </span>
             </div>
             <div className="flex items-center gap-3 text-sm text-(--text-secondary)">
-              <a
-                className="inline-flex items-center gap-2 transition hover:text-(--text-primary)"
-                href="https://histora.dev"
-                target="_blank"
-                rel="noreferrer noopener"
-              >
-                <ExternalLink size={16} /> View repo
-              </a>
+              <span className="font-mono text-[11px] uppercase tracking-[0.32em] text-(--text-muted)">
+                Chronicle
+              </span>
               <span aria-hidden className="h-3 w-px bg-(--border-strong)" />
-              <span>© {new Date().getFullYear()} Histora demo</span>
+              <span>© {new Date().getFullYear()} Histora</span>
             </div>
           </div>
         </div>

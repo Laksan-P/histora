@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertTriangle,
+  AudioWaveform,
   ChevronLeft,
   Mic,
   MicOff,
@@ -73,6 +74,7 @@ type ChatPanelProps = {
   onDeleteConversation: (conversationId: string) => void
   onNewChat: () => void
   onToggleArchive: (noteId: string) => void
+  onOpenLiveInterview: () => void
 }
 
 const SUGGESTIONS = [
@@ -129,6 +131,7 @@ export default function ChatPanel({
   onDeleteConversation,
   onNewChat,
   onToggleArchive,
+  onOpenLiveInterview,
 }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -578,6 +581,18 @@ export default function ChatPanel({
                     Female
                   </button>
                 </div>
+                <motion.button
+                  type="button"
+                  onClick={onOpenLiveInterview}
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.96 }}
+                  transition={{ type: 'spring', stiffness: 380, damping: 26 }}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-(--accent)/40 bg-(--accent-soft) px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-(--accent) transition hover:bg-(--accent) hover:text-(--background) sm:px-3 sm:tracking-[0.22em]"
+                  aria-label={`Open Live Interview with ${character.name}`}
+                >
+                  <AudioWaveform size={11} />
+                  Live Interview
+                </motion.button>
                 <span className="inline-flex min-w-0 max-w-full shrink items-center gap-2 rounded-full border border-(--border-soft) bg-(--surface) px-2 py-1 text-[11px] text-(--text-secondary) sm:px-3">
                   <span className="relative grid h-2 w-2 shrink-0 place-items-center">
                     <span className="absolute inset-0 animate-ping rounded-full bg-emerald-400/60" />
@@ -596,19 +611,23 @@ export default function ChatPanel({
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -6 }}
                   transition={{ duration: 0.2, ease: 'easeOut' }}
-                  className="flex flex-wrap items-start gap-2 border-b border-rose-400/25 bg-rose-400/[0.07] px-4 py-2.5 text-[11px] leading-relaxed text-rose-100 sm:px-6"
+                  // Theme-aware error banner: dark rose ink on a light rose
+                  // backdrop in light mode, light rose ink on a translucent
+                  // rose backdrop in dark mode. Both modes hit > 4.5:1
+                  // contrast against their respective surfaces.
+                  className="flex flex-wrap items-start gap-2 border-b border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-[11px] leading-relaxed text-rose-700 sm:px-6 dark:border-rose-400/25 dark:bg-rose-400/[0.07] dark:text-rose-100"
                   role="alert"
                 >
                   <AlertTriangle
                     size={14}
-                    className="mt-0.5 shrink-0 text-rose-400"
+                    className="mt-0.5 shrink-0 text-rose-600 dark:text-rose-400"
                     aria-hidden
                   />
                   <p className="min-w-0 flex-1 text-pretty">{ttsError}</p>
                   <button
                     type="button"
                     onClick={onDismissTtsError}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-full border border-rose-400/35 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-rose-100 transition hover:bg-rose-400/15"
+                    className="inline-flex shrink-0 items-center gap-1 rounded-full border border-rose-500/40 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-rose-700 transition hover:bg-rose-500/15 dark:border-rose-400/35 dark:text-rose-100 dark:hover:bg-rose-400/15"
                   >
                     <X size={11} aria-hidden />
                     Dismiss

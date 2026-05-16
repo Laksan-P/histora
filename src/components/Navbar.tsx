@@ -3,13 +3,16 @@ import { Compass, Crown, LogOut, UserCircle } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import ThemeToggle from './ThemeToggle'
 import { HistoraLogoMark } from './HistoraLogoMark'
-import { cn } from '../lib/cn'
+import UserAvatar from './UserAvatar'
 
 export type NavLandingSection = 'how-it-works' | 'source-grounded'
 
 type AccountInfo = {
   email: string | null
   isAdmin: boolean
+  fullName?: string | null
+  username?: string | null
+  avatarUrl?: string | null
 }
 
 type NavbarProps = {
@@ -19,6 +22,7 @@ type NavbarProps = {
   onStart: () => void
   account?: AccountInfo | null
   onOpenAdmin?: () => void
+  onOpenProfile?: () => void
   onSignOut?: () => void
 }
 
@@ -32,13 +36,6 @@ const NAV_LINKS: NavLink[] = [
   { kind: 'section', label: 'Why source-grounded', section: 'source-grounded' },
 ]
 
-function initialsFromEmail(email: string | null): string {
-  if (!email) return 'H'
-  const trimmed = email.trim()
-  if (!trimmed) return 'H'
-  return trimmed.charAt(0).toUpperCase()
-}
-
 export default function Navbar({
   onLogoClick,
   onGoToEvents,
@@ -46,6 +43,7 @@ export default function Navbar({
   onStart,
   account,
   onOpenAdmin,
+  onOpenProfile,
   onSignOut,
 }: NavbarProps) {
   const [menuOpen, setMenuOpen] = useState(false)
@@ -157,17 +155,26 @@ export default function Navbar({
               whileHover={{ scale: 1.04 }}
               whileTap={{ scale: 0.94 }}
               transition={{ type: 'spring', stiffness: 380, damping: 26 }}
-              className={cn(
-                'grid h-9 w-9 place-items-center rounded-full border bg-(--surface-strong) text-xs font-semibold uppercase text-(--text-primary) transition sm:h-10 sm:w-10 sm:text-sm',
-                account.isAdmin
-                  ? 'border-(--accent)/60'
-                  : 'border-(--border-soft) hover:border-(--accent)/60',
-              )}
+              className="rounded-full transition focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent)/60"
               aria-haspopup="menu"
               aria-expanded={menuOpen}
               aria-label="Account menu"
             >
-              {initialsFromEmail(account.email)}
+              {/* The avatar carries its own circular border via the
+                  `ringed` prop, so the button itself is sized exactly
+                  to the avatar — no extra padding or outer ring layers
+                  that would push it taller than the neighbouring
+                  "Begin Exploring" / "Admin" buttons. */}
+              <UserAvatar
+                src={account.avatarUrl}
+                fullName={account.fullName}
+                username={account.username}
+                email={account.email}
+                size="md"
+                ringed={account.isAdmin}
+                eager
+                alt={account.fullName ?? account.email ?? 'Profile avatar'}
+              />
             </motion.button>
 
             <AnimatePresence>
@@ -178,22 +185,47 @@ export default function Navbar({
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   exit={{ opacity: 0, y: -6, scale: 0.98 }}
                   transition={{ duration: 0.16, ease: 'easeOut' }}
-                  className="glass absolute right-0 top-11 z-40 w-[min(17rem,calc(100vw-2rem))] origin-top-right overflow-hidden rounded-2xl p-2 shadow-(--shadow-cinema) sm:top-12"
+                  className="glass absolute right-0 top-11 z-40 w-[min(18rem,calc(100vw-2rem))] origin-top-right overflow-hidden rounded-2xl p-2 shadow-(--shadow-cinema) sm:top-12"
                   role="menu"
                 >
                   <div className="flex items-center gap-3 rounded-xl bg-(--surface-strong) px-3 py-2.5">
-                    <span className="grid h-8 w-8 place-items-center rounded-full bg-(--accent-soft) text-(--accent)">
-                      <UserCircle size={16} />
-                    </span>
+                    <UserAvatar
+                      src={account.avatarUrl}
+                      fullName={account.fullName}
+                      username={account.username}
+                      email={account.email}
+                      size="md"
+                    />
                     <div className="min-w-0">
                       <p className="truncate text-xs font-semibold text-(--text-primary)">
-                        {account.email ?? 'Histora account'}
+                        {account.fullName ??
+                          account.username ??
+                          account.email ??
+                          'Histora account'}
+                      </p>
+                      <p className="truncate text-[10px] text-(--text-muted)">
+                        {account.email ?? '—'}
                       </p>
                       <p className="font-mono text-[9px] uppercase tracking-[0.22em] text-(--text-muted)">
                         {account.isAdmin ? 'Admin' : 'Member'}
                       </p>
                     </div>
                   </div>
+
+                  {onOpenProfile ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMenuOpen(false)
+                        onOpenProfile()
+                      }}
+                      className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-semibold text-(--text-primary) transition hover:bg-(--accent-soft) hover:text-(--accent)"
+                      role="menuitem"
+                    >
+                      <UserCircle size={13} />
+                      Profile
+                    </button>
+                  ) : null}
 
                   {account.isAdmin && onOpenAdmin ? (
                     <button
@@ -202,7 +234,7 @@ export default function Navbar({
                         setMenuOpen(false)
                         onOpenAdmin()
                       }}
-                      className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-semibold text-(--text-primary) transition hover:bg-(--accent-soft) hover:text-(--accent) sm:hidden"
+                      className="mt-1 flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs font-semibold text-(--text-primary) transition hover:bg-(--accent-soft) hover:text-(--accent)"
                       role="menuitem"
                     >
                       <Crown size={13} />

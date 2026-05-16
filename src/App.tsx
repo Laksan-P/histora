@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   BookOpenText,
@@ -12,14 +20,20 @@ import {
 import AdminDashboard from './components/admin/AdminDashboard'
 import AuroraBackground from './components/AuroraBackground'
 import AuthGate from './components/AuthGate'
+import AuthLoadingScreen from './components/AuthLoadingScreen'
+import BootSplash from './components/BootSplash'
 import CharacterGrid from './components/CharacterGrid'
 import ChatPanel from './components/ChatPanel'
 import EventGrid from './components/EventGrid'
 import Footer from './components/Footer'
 import HeroSection from './components/HeroSection'
+import LiveInterviewModal, {
+  type LiveInterviewSendResult,
+} from './components/LiveInterviewModal'
 import OnboardingGuide from './components/OnboardingGuide'
 import Marquee from './components/Marquee'
 import Navbar, { type NavLandingSection } from './components/Navbar'
+import ProfilePage from './components/ProfilePage'
 import ScrollReveal from './components/ScrollReveal'
 import {
   buildChatHistory,
@@ -41,6 +55,7 @@ import { useCharacters } from './lib/useCharacters'
 import { useConversations } from './lib/useConversations'
 import { useEvents } from './lib/useEvents'
 import { useLenis } from './lib/useLenis'
+import { useToast } from './lib/useToast'
 import {
   clearPersistedNavigation,
   readPersistedNavigation,
@@ -58,7 +73,7 @@ import {
   type TtsVoiceGender,
 } from './lib/types'
 
-type View = 'landing' | 'events' | 'characters' | 'chat' | 'admin'
+type View = 'landing' | 'events' | 'characters' | 'chat' | 'admin' | 'profile'
 
 const VALID_HISTORA_VIEWS = new Set<View>([
   'landing',
@@ -66,6 +81,7 @@ const VALID_HISTORA_VIEWS = new Set<View>([
   'characters',
   'chat',
   'admin',
+  'profile',
 ])
 
 const HOW_IT_WORKS = [
@@ -138,30 +154,81 @@ type PendingHistoryLoad = {
   title: string
 }
 
+/**
+ * Minimum on-screen time for the cinematic boot splash. Even on a fast
+ * machine where Supabase resolves the session almost instantly we want
+ * a beat of the brand to land — but not so long that returning users
+ * feel held up.
+ */
+const BOOT_SPLASH_MIN_MS = 1900
+
 export default function App() {
   const { state: authState } = useAuth()
+  const [bootMinElapsed, setBootMinElapsed] = useState(false)
 
+  // The splash runs for at least BOOT_SPLASH_MIN_MS. Once the timer has
+  // fired AND the auth bootstrap is no longer in 'loading', the splash
+  // is allowed to fade out. This is paired with the underlying body
+  // mounting behind it so the next screen is already in place when the
+  // overlay disappears — no white flash, no second load.
+  useEffect(() => {
+    const timer = window.setTimeout(
+      () => setBootMinElapsed(true),
+      BOOT_SPLASH_MIN_MS,
+    )
+    return () => window.clearTimeout(timer)
+  }, [])
+
+  const authReady = authState.status !== 'loading'
+  const splashOpen = !bootMinElapsed || !authReady
+
+  // Resolve the actual content. We always mount it (even behind the
+  // splash) so it hydrates in parallel and is ready the instant the
+  // splash dismisses.
+  let body: ReactNode
   if (authState.status === 'signed-in') {
-    return (
+    body = (
       <HistoraApp
         userId={authState.userId}
         userEmail={authState.email}
         isAdmin={authState.profile.role === 'admin'}
+        profile={authState.profile}
       />
     )
+  } else if (
+    authState.status === 'loading' ||
+    authState.status === 'verifying'
+  ) {
+    // While the auth subsystem is restoring an existing session OR
+    // running case-sensitive sign-in verification, render a polished
+    // loader instead of AuthGate / HistoraApp. This is what kills the
+    // login-flicker: we never expose the dashboard before verification
+    // passes, and we don't show the login form during verification
+    // either. (During the very first 'loading' the splash is also up,
+    // so the loader is invisible until the splash fades.)
+    body = <AuthLoadingScreen status={authState.status} />
+  } else {
+    body = <AuthGate />
   }
 
-  return <AuthGate />
+  return (
+    <>
+      {body}
+      <BootSplash isOpen={splashOpen} />
+    </>
+  )
 }
 
 type HistoraAppProps = {
   userId: string
   userEmail: string | null
   isAdmin: boolean
+  profile: import('./lib/authContext').Profile
 }
 
-function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
+function HistoraApp({ userId, userEmail, isAdmin, profile }: HistoraAppProps) {
   const { signOut } = useAuth()
+  const { showToast } = useToast()
   const lenisRef = useLenis()
   const [view, setView] = useState<View>('landing')
   const [selectedEventId, setSelectedEventId] = useState<EventId | null>(null)
@@ -196,6 +263,7 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
     string | null
   >(null)
   const [archivedSourceIds, setArchivedSourceIds] = useState<string[]>([])
+  const [isLiveInterviewOpen, setIsLiveInterviewOpen] = useState(false)
   const pendingLandingSection = useRef<NavLandingSection | null>(null)
   /** After first successful hydration from sessionStorage (or “nothing to restore”). */
   const navigationRestoreDoneRef = useRef(false)
@@ -302,6 +370,17 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
     }
   }, [stopCurrentAudio])
 
+  // If the user navigates away from chat or switches the active perspective
+  // the live overlay must close — otherwise it would float over an unrelated
+  // view with stale event/character props. We use React's render-time
+  // reconciliation pattern (compare prop derivative against current state)
+  // instead of useEffect to satisfy react-hooks/set-state-in-effect.
+  const liveInterviewAllowed =
+    view === 'chat' && !!selectedEvent && !!selectedCharacter
+  if (!liveInterviewAllowed && isLiveInterviewOpen) {
+    setIsLiveInterviewOpen(false)
+  }
+
   const scrollToId = useCallback(
     (id: string) => {
       const element = document.getElementById(id)
@@ -400,6 +479,15 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
 
     if (snap.view === 'admin') {
       if (isAdmin) setView('admin')
+      finish()
+      return
+    }
+
+    if (snap.view === 'profile') {
+      setSelectedEventId(null)
+      setSelectedCharacterId(null)
+      resetChatState()
+      setView('profile')
       finish()
       return
     }
@@ -549,65 +637,30 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
     setView('characters')
   }
 
-  const handleSend = useCallback(async () => {
-    if (!inputValue.trim() || !selectedEvent || !selectedCharacter) return
-    if (isThinking) return
+  /**
+   * Reusable "ask a brand-new question" flow used by both the text input
+   * (`handleSend`) and the Live Interview overlay. Appends the user
+   * message, persists it (when Supabase history is available), calls
+   * `/api/chat`, then appends and persists the assistant reply. Returns
+   * the assistant text so the caller — e.g. the live overlay — can hand
+   * it to ElevenLabs for playback. The editing path stays inside
+   * `handleSend` because it has its own delete-and-replace bookkeeping.
+   */
+  const submitNewMessage = useCallback(
+    async (
+      question: string,
+      // The `source` flag is forwarded so callers (text input, live overlay,
+      // future voice flows) can be distinguished in console diagnostics
+      // without changing the persistence path.
+      options: { source?: 'text' | 'voice' | 'live' } = {},
+    ): Promise<{ assistantText: string } | null> => {
+      const sourceLabel = options.source ?? 'text'
+      if (!selectedEvent || !selectedCharacter) return null
+      if (isThinking) return null
+      const trimmed = question.trim()
+      if (!trimmed) return null
 
-    const trimmed = inputValue.trim()
-    const isEditing = editingMessageId !== null
-    let activeConvId = conversationId
-    let nextMessages: ChatMessage[]
-
-    if (isEditing) {
-      const idx = messages.findIndex(
-        (message) => message.id === editingMessageId,
-      )
-      if (idx === -1) {
-        setEditingMessageId(null)
-        return
-      }
-      const target = messages[idx]
-      if (target.role !== 'user') {
-        setEditingMessageId(null)
-        return
-      }
-
-      const followingIds = messages
-        .slice(idx + 1)
-        .map((message) => message.id)
-      const updated: ChatMessage = { ...target, content: trimmed }
-      nextMessages = [...messages.slice(0, idx), updated]
-
-      setMessages(nextMessages)
-      setInputValue('')
-      setEditingMessageId(null)
-      setIsThinking(true)
-
-      // Stop voice playback because the regenerated response will replace any
-      // audio tied to the deleted assistant message.
-      stopCurrentAudio()
-      setPlayingMessageId(null)
-      setIsSynthesizing(false)
-      ttsAbortRef.current?.abort()
-
-      if (activeConvId && isHistoryAvailable()) {
-        const tasks: Promise<unknown>[] = [
-          updateMessage({
-            conversationId: activeConvId,
-            messageId: target.id,
-            content: trimmed,
-          }),
-        ]
-        if (followingIds.length > 0) {
-          tasks.push(deleteMessagesByIds(activeConvId, followingIds))
-        }
-        void Promise.all(tasks)
-          .then(() => setHistoryRefreshKey((key) => key + 1))
-          .catch((error) =>
-            console.error('[histora] could not persist edit:', error),
-          )
-      }
-    } else {
+      let activeConvId = conversationId
       const userMessage: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'user',
@@ -615,13 +668,10 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
         content: trimmed,
       }
 
-      nextMessages = [...messages, userMessage]
+      const nextMessages = [...messages, userMessage]
       setMessages(nextMessages)
-      setInputValue('')
       setIsThinking(true)
 
-      // Ensure we have a conversation row before saving messages. If history is
-      // not configured we silently skip persistence — chat still works locally.
       if (isHistoryAvailable()) {
         if (!activeConvId) {
           try {
@@ -657,6 +707,157 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
             )
         }
       }
+
+      chatAbortRef.current?.abort()
+      const controller = new AbortController()
+      chatAbortRef.current = controller
+
+      try {
+        const { message, sources } = await requestChatCompletion({
+          event: selectedEvent,
+          character: selectedCharacter,
+          sources: eventSourceNotes,
+          history: buildChatHistory(nextMessages),
+          signal: controller.signal,
+        })
+
+        if (controller.signal.aborted) return null
+
+        const fallbackSources = eventSourceNotes
+          .slice(0, 2)
+          .map((note) => note.title)
+
+        const assistantMessage: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          author: selectedCharacter.name,
+          content: message,
+          sources: sources.length > 0 ? sources : fallbackSources,
+        }
+
+        setMessages((prev) => [...prev, assistantMessage])
+
+        if (activeConvId && isHistoryAvailable()) {
+          void appendMessage({
+            conversationId: activeConvId,
+            messageId: assistantMessage.id,
+            role: 'assistant',
+            content: assistantMessage.content,
+            sourceNotes: assistantMessage.sources ?? [],
+          })
+            .then(() => setHistoryRefreshKey((key) => key + 1))
+            .catch((error) =>
+              console.error(
+                '[histora] could not save assistant message:',
+                error,
+              ),
+            )
+        }
+
+        return { assistantText: assistantMessage.content }
+      } catch (error) {
+        if (controller.signal.aborted) return null
+        const detail =
+          error instanceof Error
+            ? error.message
+            : 'I could not reach the archive just now.'
+        console.error(
+          `[histora] chat completion failed (source=${sourceLabel}):`,
+          error,
+        )
+        const fallback: ChatMessage = {
+          id: crypto.randomUUID(),
+          role: 'assistant',
+          author: 'Archive',
+          content: `The archive is unreachable for a moment. Please try again shortly. (${detail})`,
+        }
+        setMessages((prev) => [...prev, fallback])
+        return null
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsThinking(false)
+        }
+        if (chatAbortRef.current === controller) {
+          chatAbortRef.current = null
+        }
+      }
+    },
+    [
+      isThinking,
+      messages,
+      selectedCharacter,
+      selectedEvent,
+      eventSourceNotes,
+      conversationId,
+      userId,
+    ],
+  )
+
+  const handleSend = useCallback(async () => {
+    if (!inputValue.trim() || !selectedEvent || !selectedCharacter) return
+    if (isThinking) return
+
+    const trimmed = inputValue.trim()
+    const isEditing = editingMessageId !== null
+
+    if (!isEditing) {
+      // Brand-new question: clear the input optimistically and delegate the
+      // append/persist/chat round-trip to the shared helper. The Live
+      // Interview overlay also flows through `submitNewMessage`, so both
+      // entry points behave identically.
+      setInputValue('')
+      await submitNewMessage(trimmed, { source: 'text' })
+      return
+    }
+
+    const idx = messages.findIndex(
+      (message) => message.id === editingMessageId,
+    )
+    if (idx === -1) {
+      setEditingMessageId(null)
+      return
+    }
+    const target = messages[idx]
+    if (target.role !== 'user') {
+      setEditingMessageId(null)
+      return
+    }
+
+    const followingIds = messages
+      .slice(idx + 1)
+      .map((message) => message.id)
+    const updated: ChatMessage = { ...target, content: trimmed }
+    const nextMessages = [...messages.slice(0, idx), updated]
+    const activeConvId = conversationId
+
+    setMessages(nextMessages)
+    setInputValue('')
+    setEditingMessageId(null)
+    setIsThinking(true)
+
+    // Stop voice playback because the regenerated response will replace any
+    // audio tied to the deleted assistant message.
+    stopCurrentAudio()
+    setPlayingMessageId(null)
+    setIsSynthesizing(false)
+    ttsAbortRef.current?.abort()
+
+    if (activeConvId && isHistoryAvailable()) {
+      const tasks: Promise<unknown>[] = [
+        updateMessage({
+          conversationId: activeConvId,
+          messageId: target.id,
+          content: trimmed,
+        }),
+      ]
+      if (followingIds.length > 0) {
+        tasks.push(deleteMessagesByIds(activeConvId, followingIds))
+      }
+      void Promise.all(tasks)
+        .then(() => setHistoryRefreshKey((key) => key + 1))
+        .catch((error) =>
+          console.error('[histora] could not persist edit:', error),
+        )
     }
 
     chatAbortRef.current?.abort()
@@ -733,10 +934,36 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
     selectedEvent,
     eventSourceNotes,
     conversationId,
-    userId,
     editingMessageId,
     stopCurrentAudio,
+    submitNewMessage,
   ])
+
+  const handleSendLiveMessage = useCallback(
+    async (
+      question: string,
+    ): Promise<LiveInterviewSendResult | null> => {
+      const result = await submitNewMessage(question, { source: 'live' })
+      return result
+    },
+    [submitNewMessage],
+  )
+
+  const handleOpenLiveInterview = useCallback(() => {
+    // Hand off audio control to the modal — kill anything currently playing
+    // through the regular voice player so the two paths never overlap.
+    stopCurrentAudio()
+    ttsAbortRef.current?.abort()
+    ttsAbortRef.current = null
+    setPlayingMessageId(null)
+    setIsSynthesizing(false)
+    setTtsError(null)
+    setIsLiveInterviewOpen(true)
+  }, [stopCurrentAudio])
+
+  const handleCloseLiveInterview = useCallback(() => {
+    setIsLiveInterviewOpen(false)
+  }, [])
 
   const handleEditMessage = useCallback(
     (messageId: string) => {
@@ -1148,14 +1375,23 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
     setView('admin')
   }, [isAdmin, resetChatState])
 
+  const handleOpenProfile = useCallback(() => {
+    resetChatState()
+    setSelectedEventId(null)
+    setSelectedCharacterId(null)
+    setView('profile')
+  }, [resetChatState])
+
   const handleSignOut = useCallback(() => {
     clearPersistedNavigation()
     resetChatState()
     setSelectedEventId(null)
     setSelectedCharacterId(null)
     setView('landing')
-    void signOut()
-  }, [resetChatState, signOut])
+    void signOut().then(() => {
+      showToast('success', 'Signed out successfully.')
+    })
+  }, [resetChatState, showToast, signOut])
 
   return (
     <div className="relative box-border min-h-screen w-full max-w-[100vw] min-w-0 overflow-x-clip">
@@ -1165,8 +1401,15 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
         onGoToEvents={goToEvents}
         onScrollToLandingSection={handleScrollToLandingSection}
         onStart={goToEvents}
-        account={{ email: userEmail, isAdmin }}
+        account={{
+          email: userEmail,
+          isAdmin,
+          fullName: profile.fullName,
+          username: profile.username,
+          avatarUrl: profile.avatarUrl,
+        }}
         onOpenAdmin={isAdmin ? handleOpenAdmin : undefined}
+        onOpenProfile={handleOpenProfile}
         onSignOut={handleSignOut}
       />
 
@@ -1379,6 +1622,28 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
           </motion.main>
         ) : null}
 
+        {view === 'profile' ? (
+          <motion.main
+            key="profile"
+            variants={viewVariants}
+            initial="initial"
+            animate="enter"
+            exit="exit"
+            transition={viewTransition}
+            style={{ willChange: 'transform, opacity' }}
+            className="pt-2 pb-6 sm:pt-3 sm:pb-7"
+          >
+            <ProfilePage
+              profile={profile}
+              userEmail={userEmail}
+              isAdmin={isAdmin}
+              onBack={handleLogo}
+              onOpenAdmin={isAdmin ? handleOpenAdmin : undefined}
+              onSignOut={handleSignOut}
+            />
+          </motion.main>
+        ) : null}
+
         {view === 'chat' && (selectedEvent || pendingHistoryLoad) ? (
           <motion.main
             key="chat"
@@ -1437,6 +1702,7 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
                 }}
                 onNewChat={handleNewChat}
                 onToggleArchive={handleToggleArchive}
+                onOpenLiveInterview={handleOpenLiveInterview}
               />
             ) : (
               <section className="mx-auto w-full max-w-7xl px-4 pb-2 sm:px-6 lg:px-8">
@@ -1470,6 +1736,18 @@ function HistoraApp({ userId, userEmail, isAdmin }: HistoraAppProps) {
           </motion.main>
         ) : null}
       </AnimatePresence>
+
+      {selectedEvent && selectedCharacter ? (
+        <LiveInterviewModal
+          isOpen={isLiveInterviewOpen}
+          onClose={handleCloseLiveInterview}
+          event={selectedEvent}
+          character={selectedCharacter}
+          voiceGender={ttsVoiceGender}
+          conversationId={conversationId}
+          onSendLiveMessage={handleSendLiveMessage}
+        />
+      ) : null}
 
       <Footer variant={view === 'chat' ? 'chat' : 'default'} />
     </div>

@@ -2,7 +2,7 @@
 export const NAVIGATION_STORAGE_KEY = 'histora.navigation.v1'
 
 export type PersistedNavigation = {
-  view: 'landing' | 'events' | 'characters' | 'chat' | 'admin'
+  view: 'landing' | 'events' | 'characters' | 'chat' | 'admin' | 'profile'
   eventId: string | null
   characterId: string | null
   conversationId: string | null

@@ -1,5 +1,5 @@
 import { motion, useReducedMotion, useScroll, useTransform } from 'framer-motion'
-import { ArrowDown, ArrowRight, Mic, Sparkles } from 'lucide-react'
+import { ArrowDown, ArrowRight, Sparkles } from 'lucide-react'
 import { useRef } from 'react'
 
 type HeroSectionProps = {
@@ -111,7 +111,7 @@ export default function HeroSection({ onBegin }: HeroSectionProps) {
           initial={{ opacity: 0, y: 14 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.6, delay: 0.45 }}
-          className="mt-9 flex flex-col items-center gap-4 sm:flex-row"
+          className="mt-9 flex justify-center"
         >
           <motion.button
             type="button"
@@ -133,11 +133,6 @@ export default function HeroSection({ onBegin }: HeroSectionProps) {
               <ArrowRight size={15} />
             </span>
           </motion.button>
-
-          <div className="inline-flex items-center gap-3 rounded-full border border-(--border-soft) bg-(--surface) px-5 py-3 text-sm text-(--text-secondary)">
-            <Mic size={14} className="text-(--accent)" />
-            ElevenLabs voice ready
-          </div>
         </motion.div>
 
         <motion.div

@@ -3,18 +3,35 @@ import {
   AlertTriangle,
   ArrowRight,
   BookOpenText,
+  Camera,
   Loader2,
   Lock,
   Mail,
+  MapPin,
   ShieldCheck,
   Sparkles,
+  Trash2,
+  User,
+  Users,
 } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from 'react'
 import AuroraBackground from './AuroraBackground'
 import { HistoraLogoMark } from './HistoraLogoMark'
+import TermsConsentPage from './TermsConsentPage'
 import ThemeToggle from './ThemeToggle'
+import UserAvatar from './UserAvatar'
+import { uploadAvatar } from '../lib/avatarStorage'
+import { supabase } from '../lib/supabaseClient'
 import { useAuth } from '../lib/useAuth'
+import { useToast } from '../lib/useToast'
 import { cn } from '../lib/cn'
+import type { ProfileUsageType } from '../lib/authContext'
 
 type Mode = 'login' | 'signup'
 
@@ -36,21 +53,90 @@ const HIGHLIGHTS = [
   },
 ]
 
+const USAGE_OPTIONS: Array<{ value: ProfileUsageType; label: string }> = [
+  { value: 'student', label: 'Student' },
+  { value: 'teacher', label: 'Teacher' },
+  { value: 'researcher', label: 'Researcher' },
+  { value: 'enthusiast', label: 'History enthusiast' },
+  { value: 'other', label: 'Other' },
+]
+
+const USERNAME_PATTERN = /^[a-zA-Z0-9_.-]{3,32}$/
+
 function describeMinPasswordLength(): string {
   return 'Password must be at least 6 characters.'
 }
 
 export default function AuthGate() {
   const { state, signIn, signUp } = useAuth()
+  const { showToast } = useToast()
   const [mode, setMode] = useState<Mode>('login')
+  const [showTerms, setShowTerms] = useState(false)
+
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [fullName, setFullName] = useState('')
+  const [username, setUsername] = useState('')
+  const [country, setCountry] = useState('')
+  const [usageType, setUsageType] = useState<ProfileUsageType>('student')
+  // When the user picks "Other" in the I-am-a dropdown we reveal a free
+  // text field so they can describe their actual role (e.g. "Museum
+  // curator"). On submit, that custom string becomes the `usage_type`
+  // value persisted to Supabase, falling back to literal 'other' if the
+  // user leaves it blank.
+  const [usageTypeOther, setUsageTypeOther] = useState('')
+  const [favoriteHistory, setFavoriteHistory] = useState('')
+  const [avatarFile, setAvatarFile] = useState<File | null>(null)
+  const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null)
+  const [acceptedTerms, setAcceptedTerms] = useState(false)
+
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const isLoading = state.status === 'loading'
   const isUnavailable = state.status === 'unavailable'
+
+  // Revoke any blob URL we created for the avatar preview when it changes
+  // or when the form unmounts so we don't leak object URLs.
+  useEffect(() => {
+    return () => {
+      if (avatarPreviewUrl && avatarPreviewUrl.startsWith('blob:')) {
+        URL.revokeObjectURL(avatarPreviewUrl)
+      }
+    }
+  }, [avatarPreviewUrl])
+
+  const handleAvatarPick = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    if (!file.type.startsWith('image/')) {
+      showToast('error', 'Please choose an image file for your avatar.')
+      return
+    }
+    if (file.size > 4 * 1024 * 1024) {
+      showToast('error', 'Avatar image must be under 4 MB.')
+      return
+    }
+    if (avatarPreviewUrl && avatarPreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(avatarPreviewUrl)
+    }
+    const url = URL.createObjectURL(file)
+    setAvatarFile(file)
+    setAvatarPreviewUrl(url)
+  }
+
+  const clearAvatar = () => {
+    if (avatarPreviewUrl && avatarPreviewUrl.startsWith('blob:')) {
+      URL.revokeObjectURL(avatarPreviewUrl)
+    }
+    setAvatarFile(null)
+    setAvatarPreviewUrl(null)
+  }
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -58,43 +144,165 @@ export default function AuthGate() {
 
     const trimmedEmail = email.trim()
     if (!trimmedEmail || !password) {
-      setError('Enter an email and password to continue.')
+      const message = 'Enter an email and password to continue.'
+      setError(message)
+      showToast('error', message)
       return
     }
     if (password.length < 6) {
-      setError(describeMinPasswordLength())
+      const message = describeMinPasswordLength()
+      setError(message)
+      showToast('error', message)
       return
+    }
+
+    if (mode === 'signup') {
+      const trimmedFullName = fullName.trim()
+      const trimmedUsername = username.trim()
+      if (!trimmedFullName) {
+        const message = 'Please tell us your full name.'
+        setError(message)
+        showToast('error', message)
+        return
+      }
+      if (!trimmedUsername) {
+        const message = 'Please choose a username.'
+        setError(message)
+        showToast('error', message)
+        return
+      }
+      if (!USERNAME_PATTERN.test(trimmedUsername)) {
+        const message =
+          'Username must be 3–32 characters: letters, numbers, dot, underscore, or dash.'
+        setError(message)
+        showToast('error', message)
+        return
+      }
+      if (password !== confirmPassword) {
+        const message = 'Passwords do not match.'
+        setError(message)
+        showToast('error', message)
+        return
+      }
+      if (!acceptedTerms) {
+        const message =
+          'Please review and accept the Terms & Consent before signing up.'
+        setError(message)
+        showToast('error', message)
+        return
+      }
     }
 
     setSubmitting(true)
     setError(null)
     setInfo(null)
     try {
-      const result =
-        mode === 'login'
-          ? await signIn(trimmedEmail, password)
-          : await signUp(trimmedEmail, password)
-
-      if (!result.ok) {
-        setError(result.error)
+      if (mode === 'login') {
+        const result = await signIn(trimmedEmail, password)
+        if (result.ok === false) {
+          const reason: string = result.error
+          setError(reason)
+          // AuthProvider already returns the user-facing message:
+          //   - "Incorrect email or password." for wrong email/password
+          //   - "Email is case-sensitive…" for case mismatches
+          //   - friendlier text for confirmation/rate-limit errors
+          // so the toast just surfaces that string verbatim.
+          showToast('error', reason)
+          return
+        }
+        // The toast persists across the AuthGate → AuthLoadingScreen →
+        // HistoraApp chain because ToastProvider is mounted at the
+        // root, so the user lands on the dashboard with the
+        // confirmation already on screen.
+        showToast('success', 'Logged in successfully.')
         return
       }
 
-      if (mode === 'signup') {
-        // Supabase may require email confirmation depending on project
-        // settings — surface a hint so the user knows what to do next.
-        setInfo(
-          'Check your inbox for a confirmation link, then sign in to begin.',
-        )
-        setMode('login')
-        setPassword('')
+      // ---- signup path ----
+      // If the user picked "Other" and described their role, persist the
+      // free-text value so the profile carries something meaningful (e.g.
+      // "Museum curator") instead of the literal sentinel "other".
+      const trimmedOtherUsage = usageTypeOther.trim()
+      const resolvedUsageType =
+        usageType === 'other' && trimmedOtherUsage.length > 0
+          ? trimmedOtherUsage
+          : usageType
+
+      const result = await signUp(trimmedEmail, password, {
+        fullName: fullName.trim(),
+        username: username.trim(),
+        country: country.trim(),
+        usageType: resolvedUsageType,
+        favoriteHistory: favoriteHistory.trim(),
+        avatarUrl: null,
+        acceptedTerms,
+      })
+      if (result.ok === false) {
+        const reason: string = result.error
+        setError(reason)
+        showToast('error', reason)
+        return
       }
+
+      // If the project has email confirmation off, Supabase already has a
+      // session here — try to upload the avatar and patch profile.avatar_url.
+      // If confirmation is on, we'll defer the upload to the Profile page
+      // after first sign-in, so the success message tells the user that.
+      let avatarUploaded = false
+      let avatarFailedReason: string | null = null
+      if (avatarFile && supabase) {
+        const { data: userResult } = await supabase.auth.getUser()
+        const uid = userResult?.user?.id
+        if (uid) {
+          const upload = await uploadAvatar(uid, avatarFile)
+          if (upload.ok === false) {
+            avatarFailedReason = upload.error
+          } else {
+            const { error: avatarError } = await supabase
+              .from('profiles')
+              .update({ avatar_url: upload.publicUrl })
+              .eq('id', uid)
+            if (avatarError) {
+              avatarFailedReason = avatarError.message
+            } else {
+              avatarUploaded = true
+            }
+          }
+        }
+      }
+
+      const baseMessage =
+        'Account created. Check your inbox if confirmation is required, then sign in.'
+      const message =
+        avatarFile && !avatarUploaded
+          ? `${baseMessage} You can upload your avatar from the Profile page after signing in.`
+          : baseMessage
+      setInfo(message)
+      showToast('success', message)
+      if (avatarFailedReason) {
+        console.warn('[histora] avatar upload skipped:', avatarFailedReason)
+      }
+
+      // Reset signup-only fields and bounce back to the login form so the
+      // user can sign in straight away.
+      setMode('login')
+      setPassword('')
+      setConfirmPassword('')
+      setFullName('')
+      setUsername('')
+      setCountry('')
+      setUsageType('student')
+      setUsageTypeOther('')
+      setFavoriteHistory('')
+      setAcceptedTerms(false)
+      clearAvatar()
     } catch (caught) {
-      setError(
+      const message =
         caught instanceof Error
           ? caught.message
-          : 'Something went wrong. Please try again.',
-      )
+          : 'Something went wrong. Please try again.'
+      setError(message)
+      showToast('error', message)
     } finally {
       setSubmitting(false)
     }
@@ -105,6 +313,19 @@ export default function AuthGate() {
     setMode(next)
     setError(null)
     setInfo(null)
+  }
+
+  if (showTerms) {
+    return (
+      <TermsConsentPage
+        onBack={() => setShowTerms(false)}
+        backLabel="Back to signup"
+        onAccept={() => {
+          setAcceptedTerms(true)
+          setShowTerms(false)
+        }}
+      />
+    )
   }
 
   return (
@@ -230,56 +451,236 @@ export default function AuthGate() {
             </div>
 
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-              <label className="flex flex-col gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-(--text-muted)">
-                Email
-                <span className="relative">
-                  <Mail
-                    size={14}
-                    className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-(--text-muted)"
-                  />
-                  <input
-                    type="email"
-                    autoComplete="email"
-                    required
-                    inputMode="email"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    value={email}
-                    onChange={(event) =>
-                      setEmail(event.target.value.replace(/\s/g, ''))
-                    }
-                    placeholder="you@archive.org"
-                    className="w-full max-w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
-                  />
-                </span>
-              </label>
+              {mode === 'signup' ? (
+                <>
+                  <div className="flex flex-col gap-3 rounded-2xl border border-(--border-soft) bg-(--surface) p-4 sm:flex-row sm:items-center sm:gap-4">
+                    <UserAvatar
+                      src={avatarPreviewUrl}
+                      fullName={fullName}
+                      username={username}
+                      email={email}
+                      size="xl"
+                      ringed
+                      eager
+                      alt="Avatar preview"
+                    />
+                    <div className="flex min-w-0 flex-1 flex-col gap-2">
+                      <span className="text-xs font-semibold uppercase tracking-[0.22em] text-(--text-muted)">
+                        Profile photo
+                      </span>
+                      <p className="text-xs leading-relaxed text-(--text-muted)">
+                        Optional. PNG, JPG, WEBP, or GIF — up to 4 MB.
+                        Cropped into a circle automatically.
+                      </p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="inline-flex items-center gap-1.5 rounded-full border border-(--border-soft) bg-(--surface-strong) px-3 py-1.5 text-xs font-semibold text-(--text-primary) transition hover:border-(--accent)/50 hover:text-(--accent)"
+                        >
+                          <Camera size={13} />
+                          {avatarFile ? 'Replace' : 'Upload image'}
+                        </button>
+                        {avatarFile ? (
+                          <button
+                            type="button"
+                            onClick={clearAvatar}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-rose-400/30 bg-rose-400/10 px-3 py-1.5 text-xs font-semibold text-rose-300 transition hover:border-rose-400/50"
+                          >
+                            <Trash2 size={13} />
+                            Remove
+                          </button>
+                        ) : null}
+                      </div>
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/gif"
+                        onChange={handleAvatarPick}
+                        className="hidden"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FieldShell label="Full name">
+                      <FieldIcon icon={User} />
+                      <input
+                        type="text"
+                        autoComplete="name"
+                        required
+                        value={fullName}
+                        onChange={(e) => setFullName(e.target.value)}
+                        placeholder="Ada Lovelace"
+                        className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                      />
+                    </FieldShell>
+                    <FieldShell label="Username">
+                      <FieldIcon icon={Sparkles} />
+                      <input
+                        type="text"
+                        autoComplete="username"
+                        required
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        value={username}
+                        onChange={(e) =>
+                          setUsername(e.target.value.replace(/\s/g, ''))
+                        }
+                        placeholder="ada.lovelace"
+                        className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                      />
+                    </FieldShell>
+                  </div>
+                </>
+              ) : null}
+
+              <FieldShell label="Email">
+                <FieldIcon icon={Mail} />
+                <input
+                  type="email"
+                  autoComplete="email"
+                  required
+                  inputMode="email"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  value={email}
+                  onChange={(event) =>
+                    setEmail(event.target.value.replace(/\s/g, ''))
+                  }
+                  placeholder="you@archive.org"
+                  className="w-full max-w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                />
+              </FieldShell>
               <p className="-mt-2 text-[11px] leading-relaxed text-(--text-muted)">
-                Use the same email address you signed up with. Spaces are removed
-                automatically.
+                Email and password are case-sensitive. Use the exact email and
+                password you signed up with — spaces are removed automatically.
               </p>
 
-              <label className="flex flex-col gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-(--text-muted)">
-                Password
-                <span className="relative">
-                  <Lock
-                    size={14}
-                    className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-(--text-muted)"
-                  />
-                  <input
-                    type="password"
-                    autoComplete={
-                      mode === 'login' ? 'current-password' : 'new-password'
-                    }
-                    required
-                    minLength={6}
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    placeholder="At least 6 characters"
-                    className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
-                  />
-                </span>
-              </label>
+              <FieldShell label="Password">
+                <FieldIcon icon={Lock} />
+                <input
+                  type="password"
+                  autoComplete={
+                    mode === 'login' ? 'current-password' : 'new-password'
+                  }
+                  required
+                  minLength={6}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="At least 6 characters"
+                  className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                />
+              </FieldShell>
+
+              {mode === 'signup' ? (
+                <>
+                  <FieldShell label="Confirm password">
+                    <FieldIcon icon={Lock} />
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      minLength={6}
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="Re-type your password"
+                      className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                    />
+                  </FieldShell>
+
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FieldShell label="Country (optional)">
+                      <FieldIcon icon={MapPin} />
+                      <input
+                        type="text"
+                        autoComplete="country-name"
+                        value={country}
+                        onChange={(e) => setCountry(e.target.value)}
+                        placeholder="United Kingdom"
+                        className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                      />
+                    </FieldShell>
+                    <FieldShell label="I am a">
+                      <FieldIcon icon={Users} />
+                      <select
+                        value={usageType}
+                        onChange={(e) =>
+                          setUsageType(e.target.value as ProfileUsageType)
+                        }
+                        className="w-full appearance-none rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) focus:border-(--accent) focus:outline-none"
+                      >
+                        {USAGE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </FieldShell>
+                  </div>
+
+                  <AnimatePresence initial={false}>
+                    {usageType === 'other' ? (
+                      <motion.div
+                        key="usage-other"
+                        initial={{ opacity: 0, y: -6, height: 0 }}
+                        animate={{ opacity: 1, y: 0, height: 'auto' }}
+                        exit={{ opacity: 0, y: -6, height: 0 }}
+                        transition={{ duration: 0.22, ease: 'easeOut' }}
+                        className="overflow-hidden"
+                      >
+                        <FieldShell label="Tell us a bit more">
+                          <FieldIcon icon={Sparkles} />
+                          <input
+                            type="text"
+                            value={usageTypeOther}
+                            onChange={(e) => setUsageTypeOther(e.target.value)}
+                            placeholder="e.g. Museum curator, Documentary maker, Hobbyist…"
+                            maxLength={60}
+                            className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                          />
+                        </FieldShell>
+                      </motion.div>
+                    ) : null}
+                  </AnimatePresence>
+
+                  <FieldShell label="Favourite era or topic (optional)">
+                    <FieldIcon icon={BookOpenText} />
+                    <input
+                      type="text"
+                      value={favoriteHistory}
+                      onChange={(e) => setFavoriteHistory(e.target.value)}
+                      placeholder="The Age of Exploration"
+                      className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                    />
+                  </FieldShell>
+
+                  <label className="flex items-start gap-3 rounded-2xl border border-(--border-soft) bg-(--surface) px-4 py-3 text-xs leading-relaxed text-(--text-secondary)">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={acceptedTerms}
+                      onChange={(e) => setAcceptedTerms(e.target.checked)}
+                      className="mt-0.5 h-4 w-4 shrink-0 rounded border-(--border-soft) text-(--accent) focus:ring-(--accent)"
+                    />
+                    <span>
+                      I have read and agree to the{' '}
+                      <button
+                        type="button"
+                        onClick={() => setShowTerms(true)}
+                        className="font-semibold text-(--accent) underline-offset-4 hover:underline"
+                      >
+                        Histora Terms &amp; Consent
+                      </button>
+                      . I understand Histora generates AI responses grounded in
+                      curated historical sources, and I will use the platform
+                      respectfully and lawfully.
+                    </span>
+                  </label>
+                </>
+              ) : null}
 
               <AnimatePresence initial={false}>
                 {error ? (
@@ -407,5 +808,33 @@ export default function AuthGate() {
         </motion.section>
       </main>
     </div>
+  )
+}
+
+function FieldShell({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
+  return (
+    <label className="flex flex-col gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-(--text-muted)">
+      {label}
+      <span className="relative">{children}</span>
+    </label>
+  )
+}
+
+function FieldIcon({
+  icon: Icon,
+}: {
+  icon: typeof Mail
+}) {
+  return (
+    <Icon
+      size={14}
+      className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-(--text-muted)"
+    />
   )
 }
