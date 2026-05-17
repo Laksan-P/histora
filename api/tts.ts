@@ -323,7 +323,7 @@ export default async function handler(request: Request) {
     // Read the audio body — this is the second hang point on Vercel.
     // Wrap it in withTimeout so a stalled response stream cannot keep
     // the function alive past our budget. On timeout, abort the
-    // upstream controller so the socket is released.
+    // upstream controller so the socket is released..
     console.log('[api/tts] reading audio buffer')
     let audioBuffer: ArrayBuffer
     try {
