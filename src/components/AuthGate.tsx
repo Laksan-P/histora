@@ -4,6 +4,8 @@ import {
   ArrowRight,
   BookOpenText,
   Camera,
+  Eye,
+  EyeOff,
   Loader2,
   Lock,
   Mail,
@@ -90,6 +92,8 @@ export default function AuthGate() {
   const [avatarFile, setAvatarFile] = useState<File | null>(null)
   const [avatarPreviewUrl, setAvatarPreviewUrl] = useState<string | null>(null)
   const [acceptedTerms, setAcceptedTerms] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false)
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -313,6 +317,8 @@ export default function AuthGate() {
     setMode(next)
     setError(null)
     setInfo(null)
+    setShowPassword(false)
+    setShowConfirmPassword(false)
   }
 
   if (showTerms) {
@@ -562,7 +568,7 @@ export default function AuthGate() {
               <FieldShell label="Password">
                 <FieldIcon icon={Lock} />
                 <input
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   autoComplete={
                     mode === 'login' ? 'current-password' : 'new-password'
                   }
@@ -571,8 +577,21 @@ export default function AuthGate() {
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   placeholder="At least 6 characters"
-                  className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                  className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 pr-12 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
                 />
+                <button
+                  type="button"
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-2 text-(--text-muted) transition hover:bg-(--surface-strong) hover:text-(--text-primary) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent)/60"
+                >
+                  {showPassword ? (
+                    <EyeOff size={18} strokeWidth={1.75} aria-hidden />
+                  ) : (
+                    <Eye size={18} strokeWidth={1.75} aria-hidden />
+                  )}
+                </button>
               </FieldShell>
 
               {mode === 'signup' ? (
@@ -580,15 +599,32 @@ export default function AuthGate() {
                   <FieldShell label="Confirm password">
                     <FieldIcon icon={Lock} />
                     <input
-                      type="password"
+                      type={showConfirmPassword ? 'text' : 'password'}
                       autoComplete="new-password"
                       required
                       minLength={6}
                       value={confirmPassword}
                       onChange={(e) => setConfirmPassword(e.target.value)}
                       placeholder="Re-type your password"
-                      className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
+                      className="w-full rounded-2xl border border-(--border-soft) bg-(--surface) px-10 py-3 pr-12 text-sm text-(--text-primary) placeholder:text-(--text-muted) focus:border-(--accent) focus:outline-none"
                     />
+                    <button
+                      type="button"
+                      aria-label={
+                        showConfirmPassword
+                          ? 'Hide confirm password'
+                          : 'Show confirm password'
+                      }
+                      aria-pressed={showConfirmPassword}
+                      onClick={() => setShowConfirmPassword((v) => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-2 text-(--text-muted) transition hover:bg-(--surface-strong) hover:text-(--text-primary) focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent)/60"
+                    >
+                      {showConfirmPassword ? (
+                        <EyeOff size={18} strokeWidth={1.75} aria-hidden />
+                      ) : (
+                        <Eye size={18} strokeWidth={1.75} aria-hidden />
+                      )}
+                    </button>
                   </FieldShell>
 
                   <div className="grid gap-4 sm:grid-cols-2">
