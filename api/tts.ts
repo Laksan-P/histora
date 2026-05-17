@@ -1,37 +1,22 @@
 /**
  * /api/tts — ElevenLabs text-to-speech proxy.
  *
- * Hardened for Vercel's Node serverless runtime. The previous version
- * relied solely on `AbortController` against the upstream fetch, but on
- * Vercel some upstream stalls slip past the abort signal entirely, so
- * the function would happily camp the runtime until Vercel itself
- * killed it at the 300s task-timed-out wall.
- *
- * The fix is a defence-in-depth pattern:
- *
- *   1. `raceWithTimeout` wraps BOTH the upstream `fetch` and the
- *      subsequent `response.arrayBuffer()` read. Whichever resolves
- *      first — the underlying promise or our timer-driven rejection —
- *      ends that stage. This guarantees the handler returns within
- *      budget regardless of whether AbortController fires.
- *   2. When the timer wins, we still call `controller.abort()` so the
- *      socket is torn down and undici stops queuing work in the
- *      background. No orphaned promises, no event-loop drag.
- *   3. The incoming `request.signal` (provided by the Vercel Node Web
- *      handler shape) is forwarded onto our controller, so a client
- *      disconnect cancels the upstream request immediately.
- *   4. If the gendered voice fails (timeout or non-2xx) and we have a
- *      different default voice configured, we retry exactly once with
- *      that default — never a loop.
- *
- * Logs are explicit and Vercel-safe — booleans for secrets, status
- * codes for upstream calls, stage names for timeouts.
+ * The handler is hardened for the Vercel serverless runtime:
+ *   - 15s hard timeout against ElevenLabs via AbortController, so the
+ *     function never hits Vercel's 300s task-timed-out wall.
+ *   - text length capped before the upstream call so we don't ship huge
+ *     bodies that just stall the upstream connection.
+ *   - try/catch wraps everything so we always return a JSON response
+ *     (or the audio bytes) — the function can never hang open.
+ *   - logs are Vercel-safe: API key existence is logged as a boolean,
+ *     never the value, plus the resolved voice id presence, status code,
+ *     and error category (timeout / network / invalid response).
  */
 
 export const config = {
-  // Pin to the Node serverless runtime — fetch / AbortController /
-  // setTimeout semantics are tested under Node, and this also makes the
-  // runtime explicit so vercel.json's maxDuration applies cleanly.
+  // Pin to the Node serverless runtime so we get reliable timeouts and
+  // Buffer/streaming semantics. Edge would also work but the upstream
+  // ElevenLabs SDK behaviour and our error logs are tested under Node.
   runtime: 'nodejs',
 }
 
@@ -43,19 +28,18 @@ type TtsBody = {
 }
 
 const DEFAULT_MODEL = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5'
-
 /**
- * Aggressive truncation. Reliability beats long-form fidelity on a
- * serverless platform — anything past this is far more likely to stall
- * the upstream stream than to actually finish synthesizing inside our
- * budget. Hackathon priority: speed + reliability over long playback.
+ * Cap the text we send to ElevenLabs. Hackathon priority: reliability
+ * over perfect long-form speech. Anything longer than this is much more
+ * likely to time out in a serverless cold-start than to actually
+ * synthesize cleanly. Tuned down for production stability — the
+ * remaining audio is still ~30s of speech, plenty for a single reply.
  */
-const MAX_CHARS = 800
-
-/** Hard ceilings for each upstream stage. Sum < 30s function maxDuration. */
+const MAX_CHARS = 700
+/** Hard ceiling for the ElevenLabs HTTP fetch (request + headers). */
 const FETCH_TIMEOUT_MS = 12_000
+/** Hard ceiling for reading the audio body off the response stream. */
 const READ_TIMEOUT_MS = 8_000
-const ERROR_BODY_READ_TIMEOUT_MS = 2_000
 
 /** Tutorial placeholders — treat as unset so we fall back to ELEVENLABS_VOICE_ID. */
 const PLACEHOLDER_VOICE_IDS = new Set(
@@ -72,6 +56,7 @@ const PLACEHOLDER_VOICE_IDS = new Set(
 function sanitizeVoiceId(raw: string | undefined): string {
   if (typeof raw !== 'string') return ''
   let id = raw.trim().replace(/^\uFEFF/, '')
+  // Strip wrapping quotes sometimes pasted into env UIs
   if (
     (id.startsWith('"') && id.endsWith('"')) ||
     (id.startsWith("'") && id.endsWith("'"))
@@ -83,6 +68,7 @@ function sanitizeVoiceId(raw: string | undefined): string {
   return id
 }
 
+/** First non-empty sanitized voice ID from env keys (supports alternate namings). */
 function envVoice(...keys: string[]): string {
   for (const key of keys) {
     const v = sanitizeVoiceId(process.env[key])
@@ -111,6 +97,11 @@ type TtsVoiceResolution =
   | 'body-voice'
   | 'default'
 
+/**
+ * Female → ELEVENLABS_FEMALE_VOICE_ID (or ELEVENLABS_VOICE_ID_FEMALE),
+ * male → ELEVENLABS_MALE_VOICE_ID (or ELEVENLABS_VOICE_ID_MALE),
+ * then ELEVENLABS_VOICE_ID / legacy body.voiceId.
+ */
 function resolveVoiceForTts(body: TtsBody): {
   voiceId: string
   resolution: TtsVoiceResolution
@@ -134,7 +125,12 @@ function resolveVoiceForTts(body: TtsBody): {
       'ELEVENLABS_VOICE_ID_FEMALE',
     )
     if (id) return { voiceId: id, resolution: 'female-env' }
-    if (fallback) return { voiceId: fallback, resolution: 'female-fallback' }
+    if (fallback) {
+      console.warn(
+        '[api/tts] Female narrator selected but ELEVENLABS_FEMALE_VOICE_ID is missing or invalid — using ELEVENLABS_VOICE_ID fallback (often the same as the male voice). Set ELEVENLABS_FEMALE_VOICE_ID in the server environment.',
+      )
+      return { voiceId: fallback, resolution: 'female-fallback' }
+    }
     return { voiceId: '', resolution: 'female-fallback' }
   }
 
@@ -157,43 +153,27 @@ function jsonError(error: string, status: number): Response {
   })
 }
 
-class TimeoutError extends Error {
-  readonly stage: string
-  constructor(stage: string, ms: number) {
-    super(`Timed out at ${stage} after ${ms}ms`)
-    this.name = 'TimeoutError'
-    this.stage = stage
-  }
-}
-
 /**
- * Run a promise with a hard wall-clock ceiling. If the timer wins,
- * `onTimeout` fires (used to abort the in-flight controller so the
- * socket is torn down) and the race rejects with a TimeoutError.
+ * Run a promise with a hard wall-clock ceiling. If the timer fires
+ * first the race rejects with `Error(message)` so the caller can
+ * distinguish a timeout from a real upstream failure.
  *
- * This is deliberately implemented without relying on AbortController
- * alone — on Vercel some upstream stalls have been observed to ignore
- * the abort signal, so the timer-rejection path is the load-bearing
- * one. Aborting the controller is just a courtesy to free the socket.
+ * The timer is always cleared in the .then / .catch handlers so we
+ * never leak a setTimeout handle, and the rejection happens in the
+ * JavaScript runtime itself — no dependency on AbortController firing
+ * (which we've seen Vercel + undici occasionally ignore on stalled
+ * upstream streams).
  */
-function raceWithTimeout<T>(
-  task: Promise<T>,
+function withTimeout<T>(
+  promise: Promise<T>,
   ms: number,
-  stage: string,
-  onTimeout?: () => void,
+  message: string,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      console.warn(`[api/tts] timeout reached at stage: ${stage} (${ms}ms)`)
-      try {
-        onTimeout?.()
-      } catch {
-        /* swallow — abort callbacks must never throw */
-      }
-      reject(new TimeoutError(stage, ms))
+      reject(new Error(message))
     }, ms)
-
-    task.then(
+    promise.then(
       (value) => {
         clearTimeout(timer)
         resolve(value)
@@ -206,185 +186,17 @@ function raceWithTimeout<T>(
   })
 }
 
-type CallResult =
-  | { ok: true; bytes: ArrayBuffer }
-  | {
-      ok: false
-      reason: 'timeout' | 'network' | 'upstream'
-      status: number
-      body: string
-      stage?: string
-    }
-
-/**
- * One-shot synthesis attempt against ElevenLabs. Both the fetch and the
- * arrayBuffer read are timer-bounded, and the local controller is
- * forwarded to undici so a timer-trip also tears down the socket.
- */
-async function tryTtsForVoice(opts: {
-  apiKey: string
-  voiceId: string
-  text: string
-  clientSignal: AbortSignal | null
-  attemptLabel: string
-}): Promise<CallResult> {
-  const { apiKey, voiceId, text, clientSignal, attemptLabel } = opts
-
-  const controller = new AbortController()
-  const onClientAbort = () => {
-    console.warn('[api/tts] client disconnected — aborting upstream')
-    controller.abort()
-  }
-  if (clientSignal) {
-    if (clientSignal.aborted) {
-      controller.abort()
-    } else {
-      clientSignal.addEventListener('abort', onClientAbort, { once: true })
-    }
-  }
-
-  const stop = () => {
-    if (!controller.signal.aborted) controller.abort()
-  }
-
-  try {
-    console.log(`[api/tts] [${attemptLabel}] entering elevenlabs fetch`)
-    let response: Response
-    try {
-      // Minimal payload — just text + model. ElevenLabs has sane voice
-      // defaults, so omitting voice_settings keeps the body small and
-      // sidesteps any weird interaction between custom settings and
-      // Vercel's connection lifecycle that we've been chasing.
-      response = await raceWithTimeout(
-        fetch(
-          `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
-          {
-            method: 'POST',
-            signal: controller.signal,
-            headers: {
-              'xi-api-key': apiKey,
-              'content-type': 'application/json',
-              accept: 'audio/mpeg',
-            },
-            body: JSON.stringify({
-              text,
-              model_id: DEFAULT_MODEL,
-            }),
-          },
-        ),
-        FETCH_TIMEOUT_MS,
-        'fetch',
-        stop,
-      )
-    } catch (error) {
-      stop()
-      if (error instanceof TimeoutError) {
-        return {
-          ok: false,
-          reason: 'timeout',
-          status: 504,
-          body: '',
-          stage: error.stage,
-        }
-      }
-      const message =
-        error instanceof Error ? error.message : 'unknown network error'
-      console.error(
-        `[api/tts] [${attemptLabel}] network error during fetch:`,
-        message,
-      )
-      return { ok: false, reason: 'network', status: 502, body: message }
-    }
-
-    console.log(
-      `[api/tts] [${attemptLabel}] fetch completed status=${response.status}`,
-    )
-
-    if (!response.ok) {
-      // Read the failure body once, with its own short ceiling. If
-      // even reading the error body stalls, we fall back to an empty
-      // string rather than letting the function hang.
-      let body = ''
-      try {
-        body = await raceWithTimeout(
-          response.text(),
-          ERROR_BODY_READ_TIMEOUT_MS,
-          'error-body-read',
-          stop,
-        )
-      } catch (error) {
-        if (error instanceof TimeoutError) {
-          console.warn(
-            `[api/tts] [${attemptLabel}] timed out reading error body`,
-          )
-        }
-        body = ''
-      }
-      console.error(
-        `[api/tts] [${attemptLabel}] elevenlabs ${response.status}:`,
-        body.slice(0, 300),
-      )
-      return {
-        ok: false,
-        reason: 'upstream',
-        status: response.status,
-        body: body.slice(0, 500),
-      }
-    }
-
-    console.log(`[api/tts] [${attemptLabel}] entering arrayBuffer read`)
-    let bytes: ArrayBuffer
-    try {
-      bytes = await raceWithTimeout(
-        response.arrayBuffer(),
-        READ_TIMEOUT_MS,
-        'arrayBuffer',
-        stop,
-      )
-    } catch (error) {
-      stop()
-      if (error instanceof TimeoutError) {
-        return {
-          ok: false,
-          reason: 'timeout',
-          status: 504,
-          body: '',
-          stage: error.stage,
-        }
-      }
-      const message =
-        error instanceof Error ? error.message : 'unknown read error'
-      console.error(
-        `[api/tts] [${attemptLabel}] error during arrayBuffer:`,
-        message,
-      )
-      return { ok: false, reason: 'network', status: 502, body: message }
-    }
-
-    console.log(
-      `[api/tts] [${attemptLabel}] arrayBuffer completed bytes=${bytes.byteLength}`,
-    )
-
-    return { ok: true, bytes }
-  } finally {
-    if (clientSignal) {
-      clientSignal.removeEventListener('abort', onClientAbort)
-    }
-  }
-}
-
 export default async function handler(request: Request) {
-  console.log('[api/tts] request received')
-
-  // Outer try/catch is a final safety net — even if something exotic
-  // explodes, the function returns JSON instead of letting Vercel time
-  // out at the 300s wall.
+  // Wrap the entire handler so any thrown/unexpected error still returns
+  // JSON. The function must never hang and never bubble an uncaught
+  // exception up to Vercel's runtime.
   try {
     if (request.method !== 'POST') {
       return jsonError('Method not allowed', 405)
     }
 
     const apiKey = process.env.ELEVENLABS_API_KEY
+    // Vercel-safe diagnostic: presence only, never the value.
     console.log('[api/tts] apiKey present:', Boolean(apiKey))
     if (!apiKey) {
       return jsonError(
@@ -407,116 +219,151 @@ export default async function handler(request: Request) {
 
     const { voiceId, resolution } = resolveVoiceForTts(body)
     const selectedVoice = normalizeSelectedVoice(body.selectedVoice)
-    const safeText = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text
-
     console.log('[api/tts] selectedVoice:', selectedVoice ?? 'none')
     console.log('[api/tts] resolution:', resolution)
     console.log('[api/tts] voiceId present:', Boolean(voiceId))
-    console.log('[api/tts] textLength:', safeText.length)
+    console.log('[api/tts] textLength:', text.length)
 
     if (!voiceId) {
       const hint =
         selectedVoice === 'female'
-          ? 'Female voice uses ELEVENLABS_FEMALE_VOICE_ID, falling back to ELEVENLABS_VOICE_ID — at least one must be set.'
+          ? 'Female voice uses ELEVENLABS_FEMALE_VOICE_ID (or ELEVENLABS_VOICE_ID_FEMALE), falling back to ELEVENLABS_VOICE_ID — at least one must be set.'
           : selectedVoice === 'male'
-            ? 'Male voice uses ELEVENLABS_MALE_VOICE_ID, falling back to ELEVENLABS_VOICE_ID — at least one must be set.'
-            : 'Set ELEVENLABS_VOICE_ID (required fallback).'
+            ? 'Male voice uses ELEVENLABS_MALE_VOICE_ID (or ELEVENLABS_VOICE_ID_MALE), falling back to ELEVENLABS_VOICE_ID — at least one must be set.'
+            : 'Set ELEVENLABS_VOICE_ID (required fallback), optionally with ELEVENLABS_MALE_VOICE_ID and ELEVENLABS_FEMALE_VOICE_ID.'
+
       return jsonError(`No ElevenLabs voice ID configured. ${hint}`, 500)
     }
 
-    // The incoming Request carries a signal that fires when the client
-    // disconnects. We forward this all the way down so a user navigating
-    // away or refreshing instantly cancels the upstream call.
-    const clientSignal: AbortSignal | null = request.signal ?? null
+    // Cap before sending. Reliability beats long-form fidelity in a
+    // serverless context — long passages tend to either stall the
+    // upstream stream or push us past the function timeout.
+    const safeText = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) : text
 
-    const primary = await tryTtsForVoice({
-      apiKey,
-      voiceId,
-      text: safeText,
-      clientSignal,
-      attemptLabel: resolution,
-    })
+    // AbortController is forwarded to undici as a courtesy — but the
+    // load-bearing safeguard is the `withTimeout` wrapper around BOTH
+    // stages below, which guarantees the handler returns within budget
+    // even if the abort signal is ignored on a stalled stream (the
+    // exact failure mode we hit on Vercel production).
+    const upstreamController = new AbortController()
 
-    if (primary.ok) {
-      console.log('[api/tts] returning success')
-      return new Response(primary.bytes, {
-        status: 200,
-        headers: {
-          'Content-Type': 'audio/mpeg',
-          'Content-Length': String(primary.bytes.byteLength),
-          'Cache-Control': 'no-store',
-          'X-Histora-TTS-Resolution': resolution,
-        },
-      })
+    let upstream: Response
+    try {
+      console.log('[api/tts] entering elevenlabs fetch')
+      upstream = await withTimeout(
+        fetch(
+          `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}`,
+          {
+            method: 'POST',
+            signal: upstreamController.signal,
+            headers: {
+              'xi-api-key': apiKey,
+              'content-type': 'application/json',
+              accept: 'audio/mpeg',
+            },
+            body: JSON.stringify({
+              text: safeText,
+              model_id: DEFAULT_MODEL,
+              voice_settings: {
+                stability: 0.45,
+                similarity_boost: 0.85,
+                style: 0.25,
+                use_speaker_boost: true,
+              },
+            }),
+          },
+        ),
+        FETCH_TIMEOUT_MS,
+        'Voice request timed out',
+      )
+      console.log('[api/tts] fetch completed status=', upstream.status)
+    } catch (error) {
+      // Tear down the upstream socket so undici stops queuing work
+      // after we've decided to give up on this request.
+      upstreamController.abort()
+      const message =
+        error instanceof Error ? error.message : 'unknown network error'
+      const isTimeout = message === 'Voice request timed out'
+      console.error(
+        `[api/tts] upstream ${isTimeout ? 'timeout' : 'network error'}:`,
+        message,
+      )
+      return jsonError(
+        isTimeout ? 'Voice request timed out' : 'Voice service is unreachable right now.',
+        isTimeout ? 504 : 502,
+      )
     }
 
-    // Decide whether a one-shot fallback to the default voice is worth
-    // attempting. Only retry when:
-    //   - we have a real ELEVENLABS_VOICE_ID configured,
-    //   - it's actually different from the voice we just tried, and
-    //   - the client is still listening.
-    // Authentication / configuration errors (401/403/404) skip the
-    // retry — the default voice would just hit the same wall.
-    const defaultVoiceId = envVoice('ELEVENLABS_VOICE_ID')
-    const clientStillThere = !clientSignal?.aborted
-    const isAuthOrConfigError =
-      primary.reason === 'upstream' &&
-      (primary.status === 401 ||
-        primary.status === 403 ||
-        primary.status === 404)
-    const shouldFallback =
-      defaultVoiceId &&
-      defaultVoiceId !== voiceId &&
-      clientStillThere &&
-      !isAuthOrConfigError
+    console.log('[api/tts] elevenlabs status:', upstream.status)
 
-    if (shouldFallback) {
-      console.warn(
-        `[api/tts] primary attempt failed (${primary.reason}${primary.stage ? `:${primary.stage}` : ''} status=${primary.status}) — retrying once with default voice`,
-      )
-      const fallback = await tryTtsForVoice({
-        apiKey,
-        voiceId: defaultVoiceId,
-        text: safeText,
-        clientSignal,
-        attemptLabel: `${resolution}->default`,
-      })
-      if (fallback.ok) {
-        console.log('[api/tts] fallback succeeded — returning success')
-        return new Response(fallback.bytes, {
-          status: 200,
-          headers: {
-            'Content-Type': 'audio/mpeg',
-            'Content-Length': String(fallback.bytes.byteLength),
-            'Cache-Control': 'no-store',
-            'X-Histora-TTS-Resolution': `${resolution}->default`,
-          },
-        })
+    if (!upstream.ok) {
+      // Read the failure body once, defensively. If reading fails we
+      // still return a structured error rather than leaking a hang.
+      let detail = ''
+      try {
+        detail = await withTimeout(
+          upstream.text(),
+          2_000,
+          'error body read timed out',
+        )
+      } catch {
+        detail = ''
       }
       console.error(
-        `[api/tts] fallback also failed (${fallback.reason}${fallback.stage ? `:${fallback.stage}` : ''} status=${fallback.status})`,
+        `[api/tts] ElevenLabs ${upstream.status} (${resolution}):`,
+        detail.slice(0, 300),
       )
-      // Surface the worse of the two — fallback's status if it's a real
-      // upstream error, otherwise the original failure.
-      if (fallback.reason === 'timeout') {
-        return jsonError('Voice request timed out', 504)
-      }
       return jsonError(
-        fallback.body || `ElevenLabs request failed (${fallback.status}).`,
+        detail.trim().slice(0, 500) ||
+          `ElevenLabs request failed (${upstream.status}).`,
         502,
       )
     }
 
-    if (primary.reason === 'timeout') {
-      console.error('[api/tts] returning timeout error')
-      return jsonError('Voice request timed out', 504)
+    // Read the audio body — this is the second hang point on Vercel.
+    // Wrap it in withTimeout so a stalled response stream cannot keep
+    // the function alive past our budget. On timeout, abort the
+    // upstream controller so the socket is released.
+    console.log('[api/tts] reading audio buffer')
+    let audioBuffer: ArrayBuffer
+    try {
+      audioBuffer = await withTimeout(
+        upstream.arrayBuffer(),
+        READ_TIMEOUT_MS,
+        'Voice audio stream timed out',
+      )
+    } catch (error) {
+      upstreamController.abort()
+      const message =
+        error instanceof Error ? error.message : 'unknown read error'
+      if (message === 'Voice audio stream timed out') {
+        console.error('[api/tts] audio buffer timeout')
+        return jsonError('Voice audio stream timed out', 504)
+      }
+      console.error('[api/tts] audio buffer read failed:', message)
+      return jsonError(
+        'Voice service stream failed while reading audio.',
+        502,
+      )
     }
-    console.error('[api/tts] returning upstream/network error')
-    return jsonError(
-      primary.body || `ElevenLabs request failed (${primary.status}).`,
-      primary.reason === 'upstream' ? 502 : 502,
+    console.log(
+      '[api/tts] audio buffer read complete bytes=',
+      audioBuffer.byteLength,
     )
+
+    return new Response(audioBuffer, {
+      status: 200,
+      headers: {
+        'Content-Type': 'audio/mpeg',
+        'Content-Length': String(audioBuffer.byteLength),
+        'Cache-Control': 'no-store',
+        'X-Histora-TTS-Resolution': resolution,
+      },
+    })
   } catch (error) {
+    // Final safety net — even if something exotic explodes (e.g. JSON
+    // serialization, a sync throw inside fetch options), the function
+    // resolves with JSON instead of letting Vercel time out at 300s.
     console.error(
       '[api/tts] unexpected handler error:',
       error instanceof Error ? error.message : 'unknown',

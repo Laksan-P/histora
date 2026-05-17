@@ -1210,23 +1210,6 @@ function HistoraApp({ userId, userEmail, isAdmin, profile }: HistoraAppProps) {
         return
       }
 
-      // De-dupe: if a synthesis is already in flight for THIS exact
-      // message (no audio element yet, but our ref points at it), the
-      // second click is treated as a cancel rather than a duplicate
-      // request. Prevents the user mashing Play and stacking aborts on
-      // top of brand-new ElevenLabs calls.
-      if (
-        currentVoiceMessageRef.current === messageId &&
-        !audioElementRef.current
-      ) {
-        ttsAbortRef.current?.abort()
-        ttsAbortRef.current = null
-        currentVoiceMessageRef.current = null
-        setIsSynthesizing(false)
-        setTtsError(null)
-        return
-      }
-
       ttsAbortRef.current?.abort()
       const controller = new AbortController()
       ttsAbortRef.current = controller
