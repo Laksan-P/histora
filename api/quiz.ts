@@ -143,7 +143,7 @@ function normalizeQuestion(
   return { id, prompt, choices, answerIndex, rationale }
 }
 
-export default async function handler(request: Request) {
+async function handler(request: Request) {
   if (request.method !== 'POST') {
     return Response.json({ error: 'Method not allowed' }, { status: 405 })
   }
@@ -228,3 +228,6 @@ export default async function handler(request: Request) {
     return Response.json({ error: detail }, { status: 502 })
   }
 }
+
+/** Vercel Node functions expect `{ fetch }` for the Web Standards handler shape. */
+export default { fetch: handler }

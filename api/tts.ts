@@ -186,11 +186,59 @@ function withTimeout<T>(
   })
 }
 
-export default async function handler(request: Request) {
+async function handler(request: Request): Promise<Response> {
+  const vercelId = request.headers.get('x-vercel-id') ?? ''
+  console.log(
+    '[api/tts] inbound',
+    request.method,
+    vercelId ? `(x-vercel-id=${vercelId})` : '(no x-vercel-id — usually local)',
+  )
+
   // Wrap the entire handler so any thrown/unexpected error still returns
   // JSON. The function must never hang and never bubble an uncaught
   // exception up to Vercel's runtime.
   try {
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: { Allow: 'GET, HEAD, OPTIONS, POST' },
+      })
+    }
+
+    if (request.method === 'HEAD') {
+      return new Response(null, {
+        status: 200,
+        headers: {
+          Allow: 'GET, HEAD, OPTIONS, POST',
+          'cache-control': 'no-store',
+        },
+      })
+    }
+
+    if (request.method === 'GET') {
+      console.log(
+        '[api/tts] GET probe — synth requires POST JSON (browser GET never speaks audio)',
+      )
+      return Response.json(
+        {
+          ok: true,
+          service: 'histora-api-tts',
+          message:
+            'POST JSON body: {"text":"Your passage","selectedVoice":"male"|"female"}. Opening this URL in a browser only runs GET.',
+          troubleshoot: [
+            'If POST fails in prod: Vercel → Project → Logs → filter `[api/tts]` for stage-by-stage traces.',
+            'Confirm ElevenLabs env vars are attached to Production (not only Preview).',
+          ],
+        },
+        {
+          status: 200,
+          headers: {
+            'cache-control': 'no-store',
+          },
+        },
+      )
+    }
+
     if (request.method !== 'POST') {
       return jsonError('Method not allowed', 405)
     }
@@ -347,8 +395,10 @@ export default async function handler(request: Request) {
       )
     }
     console.log(
-      '[api/tts] audio buffer read complete bytes=',
+      '[api/tts] audio buffer read complete → 200 audio/mpeg bytes=',
       audioBuffer.byteLength,
+      'resolution=',
+      resolution,
     )
 
     return new Response(audioBuffer, {
@@ -371,3 +421,10 @@ export default async function handler(request: Request) {
     return jsonError('Voice service failed unexpectedly.', 500)
   }
 }
+
+/**
+ * Vercel mounts `/api/*.ts` using the Fetch Web Standard shape: `{ fetch }`.
+ * A plain `export default async function (Request)` matches local Vite middleware
+ * but is not wired the same way in production — the object form guarantees the handler runs.
+ */
+export default { fetch: handler }

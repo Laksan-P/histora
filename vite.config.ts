@@ -39,13 +39,28 @@ function devApiPlugin(): PluginOption {
 
         try {
           const mod = await server.ssrLoadModule(`/api/${fnName}.ts`)
-          const handler = (mod as { default?: unknown }).default
+          type FetchHandler = (request: Request) => Promise<Response> | Response
+          const exported = (mod as { default?: unknown }).default
+          let handler: FetchHandler | undefined
+          if (typeof exported === 'function') {
+            handler = exported as FetchHandler
+          } else if (
+            exported &&
+            typeof exported === 'object' &&
+            'fetch' in exported &&
+            typeof (exported as { fetch?: unknown }).fetch === 'function'
+          ) {
+            handler = (exported as { fetch: FetchHandler }).fetch.bind(
+              exported,
+            ) as FetchHandler
+          }
+
           if (typeof handler !== 'function') {
             nodeRes.statusCode = 500
             nodeRes.setHeader('content-type', 'application/json')
             nodeRes.end(
               JSON.stringify({
-                error: `No default export found in /api/${fnName}.ts`,
+                error: `No viable handler in /api/${fnName}.ts — export default { fetch } or export default async function (Request)`,
               }),
             )
             return
@@ -71,9 +86,7 @@ function devApiPlugin(): PluginOption {
           }
 
           const request = new Request(fullUrl, { method, headers, body })
-          const response = (await (
-            handler as (request: Request) => Promise<Response> | Response
-          )(request)) as Response
+          const response = (await handler(request)) as Response
 
           nodeRes.statusCode = response.status
           response.headers.forEach((value, key) => {
